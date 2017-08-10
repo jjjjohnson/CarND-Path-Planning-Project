@@ -202,7 +202,7 @@ int main() {
 
 
     int lane = 1;
-    double ref_vel = 49.5; // reference velocity mph
+    double ref_vel = 0; // reference velocity mph
   h.onMessage([&lane, &ref_vel, &map_waypoints_x,&map_waypoints_y,&map_waypoints_s,&map_waypoints_dx,&map_waypoints_dy](uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length,
                      uWS::OpCode opCode) {
     // "42" at the start of the message means there's a websocket message event.
@@ -247,11 +247,42 @@ int main() {
             vector<double> ptsx;
             vector<double> ptsy;
 
+            int prev_size = previous_path_x.size();
+
             double ref_x = car_x;
             double ref_y = car_y;
             double ref_yaw = deg2rad(car_yaw);
 
-            int prev_size = previous_path_x.size();
+            if (prev_size>0){
+                car_s = end_path_s;
+            }
+
+            bool too_close = false;
+            for (int i=0; i< sensor_fusion.size(); i++){
+                double d = sensor_fusion[i][6];
+                if (d > (2+4*lane-2) && (d <(2+4*lane+2))){
+                    double vx = sensor_fusion[i][3];
+                    double vy = sensor_fusion[i][4];
+                    double check_speed = sqrt(vx*vx + vy*vy);
+                    double check_car_s = sensor_fusion[i][5];
+
+                    check_car_s += 0.02*prev_size*check_speed; // check the s in the future
+
+                    if ((check_car_s > car_s) && ((check_car_s - car_s)<30) && (car_speed > check_speed)){
+                        too_close = true;
+                        break;
+
+                    }
+                }
+            }
+
+
+            if (too_close){
+                ref_vel -= 0.1;
+                prev_size = 5;
+            } else if (ref_vel < 49.5){
+                ref_vel += 0.224;
+            }
 
             if (prev_size < 2){
                 // make tangent of the path
