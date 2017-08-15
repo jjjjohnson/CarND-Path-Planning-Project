@@ -258,7 +258,7 @@ int main() {
             vector<double> ptsy;
 
             int prev_size = previous_path_x.size();
-            shift_count += 50-prev_size;
+            shift_count += 50-prev_size; // log how may steps processed after lane change
 
             double ref_x = car_x;
             double ref_y = car_y;
