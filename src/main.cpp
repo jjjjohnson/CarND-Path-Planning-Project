@@ -8,6 +8,7 @@
 #include "Eigen-3.3/Eigen/Core"
 #include "Eigen-3.3/Eigen/QR"
 #include "json.hpp"
+#include<algorithm>
 #include "spline.h"
 
 using namespace std;
@@ -162,6 +163,14 @@ vector<double> getXY(double s, double d, vector<double> maps_s, vector<double> m
 
 }
 
+bool not_collide(double car_s, double car_speed, double check_car_s, double check_car_speed, double car_x,
+                   double car_y, double check_car_x, double check_car_y){
+    bool after = (check_car_s<car_s) && (check_car_speed>car_speed) && (car_s-check_car_s<20);
+    bool before = (check_car_s>car_s) && (check_car_speed<car_speed) && (check_car_s-car_s<20);
+    bool close = distance(car_x, car_y, check_car_x, check_car_y)<25;
+    return not (after || before || close);
+}
+
 
 int main() {
   uWS::Hub h;
@@ -203,7 +212,8 @@ int main() {
 
     int lane = 1;
     double ref_vel = 0; // reference velocity mph
-  h.onMessage([&lane, &ref_vel, &map_waypoints_x,&map_waypoints_y,&map_waypoints_s,&map_waypoints_dx,&map_waypoints_dy](uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length,
+    int shift_count = 201; // make sure the lane shift is finished before another shift
+  h.onMessage([&lane, &ref_vel, &shift_count, &map_waypoints_x,&map_waypoints_y,&map_waypoints_s,&map_waypoints_dx,&map_waypoints_dy](uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length,
                      uWS::OpCode opCode) {
     // "42" at the start of the message means there's a websocket message event.
     // The 4 signifies a websocket message
@@ -248,6 +258,7 @@ int main() {
             vector<double> ptsy;
 
             int prev_size = previous_path_x.size();
+            shift_count += 50-prev_size;
 
             double ref_x = car_x;
             double ref_y = car_y;
@@ -258,30 +269,70 @@ int main() {
             }
 
             bool too_close = false;
-            for (int i=0; i< sensor_fusion.size(); i++){
+            bool left_allowed = false;
+            bool right_allowed = false;
+            vector<bool> move_left_ok;
+            vector<bool> move_right_ok;
+
+            for (int i = 0; i < sensor_fusion.size(); i++) {
+                double check_x = sensor_fusion[i][1];
+                double check_y = sensor_fusion[i][2];
                 double d = sensor_fusion[i][6];
-                if (d > (2+4*lane-2) && (d <(2+4*lane+2))){
-                    double vx = sensor_fusion[i][3];
-                    double vy = sensor_fusion[i][4];
-                    double check_speed = sqrt(vx*vx + vy*vy);
-                    double check_car_s = sensor_fusion[i][5];
-
-                    check_car_s += 0.02*prev_size*check_speed; // check the s in the future
-
-                    if ((check_car_s > car_s) && ((check_car_s - car_s)<30) && (car_speed > check_speed)){
+                double vx = sensor_fusion[i][3];
+                double vy = sensor_fusion[i][4];
+                double check_speed = sqrt(vx * vx + vy * vy);
+                double check_car_s_now = sensor_fusion[i][5];
+                double check_car_s = check_car_s_now + 0.02 * prev_size * check_speed; // check the s in the future
+                // At the same lane
+                if (d > (2 + 4 * lane - 2) && (d < (2 + 4 * lane + 2))) {
+                    if ((check_car_s > car_s) && ((check_car_s - car_s) < 30) && (car_speed > check_speed)) {
                         too_close = true;
-                        break;
-
                     }
+                }
+                // Check the left lane
+                if (d > (2 + 4 * (lane - 1) - 2) && (d < (2 + 4 * (lane - 1) + 2))) {
+                    move_left_ok.push_back(
+                            not_collide(car_speed, car_s, check_speed, check_car_s_now, ref_x, ref_y, check_x,
+                                        check_y));
+                }
+                // Check the right lane
+                if (d > (2 + 4 * (lane + 1) - 2) && (d < (2 + 4 * (lane + 1) + 2))) {
+                    move_right_ok.push_back(
+                            not_collide(car_speed, car_s, check_speed, check_car_s_now, ref_x, ref_y, check_x,
+                                        check_y));
                 }
             }
 
 
-            if (too_close){
-                ref_vel -= 0.1;
-                prev_size = 5;
-            } else if (ref_vel < 49.5){
-                ref_vel += 0.224;
+            // check if all the element in vector are true
+            left_allowed =
+                    (lane > 0) && all_of(move_left_ok.begin(), move_left_ok.end(), [](bool v) { return v; });
+            right_allowed =
+                    (lane < 2) && all_of(move_right_ok.begin(), move_right_ok.end(), [](bool v) { return v; });
+
+
+            if (shift_count > 200) {
+                if (too_close) {
+                    if (left_allowed) { // left lane change
+                        cout << "left lane change" << endl;
+                        lane -= 1;
+                        shift_count = 0;
+                    } else if (right_allowed) { // right lane change
+                        cout << "right lane change" << endl;
+                        lane += 1;
+                        shift_count = 0;
+                    } else { // keep current lane
+                        cout << "keep current lane" << endl;
+                        ref_vel -= 0.1; // slowly slow down
+                        prev_size = 3; // recalculate track
+                    }
+
+                } else if (ref_vel < 49.5) {
+                    ref_vel += 0.1;
+                }
+            } else if (too_close){
+                ref_vel -= 0.1; // slowly slow down
+                prev_size = 3; // recalculate track
             }
 
             if (prev_size < 2){
@@ -303,7 +354,7 @@ int main() {
                 double ref_x_prev = previous_path_x[prev_size-2];
                 double ref_y_prev = previous_path_y[prev_size-2];
 
-                ref_yaw = atan2(ref_y-ref_y_prev, ref_x-ref_x_prev);
+                ref_yaw = atan2(ref_y-ref_y_prev, ref_x-ref_x_prev); //use yaw to calculate vehicle coordinate
                 ptsx.push_back(ref_x_prev);
                 ptsx.push_back(ref_x);
 
@@ -341,7 +392,7 @@ int main() {
                 next_y_vals.push_back(previous_path_y[i]);
             }
 
-            double target_x = 30.0;
+            double target_x = 30;
             double target_y = s(target_x);
             double target_dist = sqrt(target_x*target_x+target_y*target_y);
 
